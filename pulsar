@@ -1,0 +1,62 @@
+#!/usr/bin/python
+
+import argparse
+import re
+import sys
+import ConfigParser
+import io
+import MySQLdb
+
+#get arguments and put them into good variable names
+parser = argparse.ArgumentParser(description='Nova name conversion/info tool')
+parser.add_argument('-c', '--convert', dest="instance name", help='Convert name and get details about instance')
+parser.add_argument('-g', '--get-instance-by-host', dest="compute host", help='Get instances on a specific host')
+args = vars(parser.parse_args())
+instanceName = args['instance name']
+computeHost = args['compute host']
+
+#convert instance name to instance ID and vice versa. Do some basic error checks.
+if instanceName:
+    if re.match(r'^instance-[a-f0-9]{8}$', instanceName):
+        instanceID = int(instanceName[-8:], 16)
+    elif re.match(r'^[1-9]', instanceName):
+        instanceID = int(instanceName)
+        instanceName = "instance-%08x" % int(instanceName)
+    else:
+        print('Check your input!')
+	sys.exit (1)
+
+
+#get mysql user/pass
+    parser = ConfigParser.SafeConfigParser()
+    mycnfexist = parser.read('/root/.my.cnf')
+    if str(mycnfexist) == str(['/root/.my.cnf']):
+        parser.read('/root/.my.cnf')
+        myUser = parser.get("client", "user")
+        myPass = parser.get("client", "password")
+    else:
+        myUser = raw_input("Enter MySQL user: ")
+        myPass = raw_input("Enter MySQL password: ")
+
+#try to connect to mysql and grab info
+    connect = None
+    try:
+        connect = MySQLdb.connect('localhost', myUser, myPass);
+        cur = connect.cursor()
+        cur.execute("""SELECT  hostname, uuid, project_id, vm_state, task_state, host FROM nova.instances WHERE id=%s""", (instanceID))
+        details = cur.fetchone()
+        cur.execute("""SELECT name FROM keystone.tenant WHERE id=%s""", (details[2]))
+        projectName = cur.fetchone()
+        try:
+            cur.execute("""SELECT address FROM nova.fixed_ips WHERE instance_id=%s""", (instanceID))
+            ipAdd = str(cur.fetchone()[0])
+        except:
+            ipAdd = str(None)
+    except MySQLdb.Error, e:
+        print "Error %d: %s" % (e.args[0],e.args[1])
+        sys.exit(1)
+    finally:
+        if connect:
+            connect.close()
+#print the needful
+    print "HOSTNAME:\t {hostname}\nHEX NAME:\t {hexname}\nID:\t\t {id}\nUUID:\t\t {uuid}\nIP:\t\t {ip}\nHOST:\t\t {host}\nTENANT:\t\t {project}\nVM STATE:\t {state}\nTASK STATE:\t {taskstate}".format(hostname=details[0], hexname=instanceName, id=instanceID, uuid=details[1], ip=ipAdd, host=details[5], project=projectName[0], state=details[3], taskstate=details[4])
