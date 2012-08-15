@@ -61,7 +61,7 @@ if instanceName:
 #print the needful
     print "HOSTNAME:\t {hostname}\nHEX NAME:\t {hexname}\nID:\t\t {id}\nUUID:\t\t {uuid}\nIP:\t\t {ip}\nHOST:\t\t {host}\nTENANT:\t\t {project}\nVM STATE:\t {state}\nTASK STATE:\t {taskstate}".format(hostname=details[0], hexname=instanceName, id=instanceID, uuid=details[1], ip=ipAdd, host=details[5], project=projectName[0], state=details[3], taskstate=details[4])
 
-
+#
 if computeHost:
     connect = None
     try:
