@@ -1,81 +1,247 @@
 #!/usr/bin/python
 
-import argparse
 import re
 import sys
+import pprint
+import argparse
 import ConfigParser
-import io
-import MySQLdb
+from collections import OrderedDict
 
-#get arguments and put them into good variable names
-parser = argparse.ArgumentParser(description='Nova name conversion/info tool')
-parser.add_argument('-c', '--convert', dest="instance name", help='Convert name and get details about instance')
-parser.add_argument('-g', '--get-instance-by-host', dest="compute host", help='Get instances on a specific host')
-args = vars(parser.parse_args())
-instanceName = args['instance name']
-computeHost = args['compute host']
-
-#convert instance name to instance ID and vice versa. Do some basic error checks.
-if instanceName:
-    if re.match(r'^instance-[a-f0-9]{8}$', instanceName):
-        instanceID = int(instanceName[-8:], 16)
-    elif re.match(r'^[1-9]', instanceName):
-        instanceID = int(instanceName)
-        instanceName = "instance-%08x" % int(instanceName)
-    else:
-        print('Check your input!')
-	sys.exit (1)
+import json
+from sqlalchemy import create_engine
 
 
-#get mysql user/pass
-    parser = ConfigParser.SafeConfigParser()
-    mycnfexist = parser.read('/root/.my.cnf')
-    if str(mycnfexist) == str(['/root/.my.cnf']):
-        parser.read('/root/.my.cnf')
-        myUser = parser.get("client", "user")
-        myPass = parser.get("client", "password")
-    else:
-        myUser = raw_input("Enter MySQL user: ")
-        myPass = raw_input("Enter MySQL password: ")
+class Pulsar(object):
+    """
+    Pulsar: utterly likable systems admin robot.
+    """
 
-#try to connect to mysql and grab info
-    connect = None
-    try:
-        connect = MySQLdb.connect('localhost', myUser, myPass);
-        cur = connect.cursor()
-        cur.execute("""SELECT  hostname, uuid, project_id, vm_state, task_state, host FROM nova.instances WHERE id=%s""", (instanceID))
-        details = cur.fetchone()
-        cur.execute("""SELECT name FROM keystone.tenant WHERE id=%s""", (details[2]))
-        projectName = cur.fetchone()
+    def __init__(self, args):
+        self._db_credentials = {}
+        self._db_connection = None
+
+        self._int_re = re.compile(r'^[1-9]')
+        self._hex_re = re.compile(r'^instance-[a-f0-9]{8}$')
+
+        self._output_json = args.use_json
+
+        self._units = (
+            (float(2**10), "KB"),
+            (float(2**20), "MB"),
+            (float(2**30), "GB"),
+            (float(2**40), "TB")
+        )
+
+        self._instance_query = """SELECT k.name as project, i.display_name,
+                                         i.id, i.uuid, i.host, i.vm_state,
+                                         i.task_state, i.vcpus,
+                                         i.memory_mb * pow(2,20) as ram,
+                                         f.address
+                                  FROM instances as i
+                                  JOIN keystone.tenant as k
+                                  ON k.id=i.project_id
+                                  JOIN fixed_ips as f
+                                  ON i.id=f.instance_id """
+
+        self._zone_query = """SELECT id, display_name as name, host, vcpus,
+                                     memory_mb * pow(2, 20) as ram
+                              FROM instances WHERE deleted=0 AND host IN
+                              (SELECT distinct host FROM services
+                               WHERE availability_zone='%s' ORDER BY host ASC)"""
+
+
         try:
-            cur.execute("""SELECT address FROM nova.fixed_ips WHERE instance_id=%s""", (instanceID))
-            ipAdd = str(cur.fetchone()[0])
-        except:
-            ipAdd = str(None)
-    except MySQLdb.Error, e:
-        print "Error %d: %s" % (e.args[0],e.args[1])
-        sys.exit(1)
-    finally:
-        if connect:
-            connect.close()
-#print the needful
-    print "HOSTNAME:\t {hostname}\nHEX NAME:\t {hexname}\nID:\t\t {id}\nUUID:\t\t {uuid}\nIP:\t\t {ip}\nHOST:\t\t {host}\nTENANT:\t\t {project}\nVM STATE:\t {state}\nTASK STATE:\t {taskstate}".format(hostname=details[0], hexname=instanceName, id=instanceID, uuid=details[1], ip=ipAdd, host=details[5], project=projectName[0], state=details[3], taskstate=details[4])
+            self.db = self._get_db_connection()
 
-#
-if computeHost:
-    connect = None
-    try:
-        connect = MySQLdb.connect('localhost', myUser, myPass);
-        cur = connect.cursor()
-        cur.execute("""SELECT hostname, id, uuid, host, vm_state, task_state FROM nova.instances WHERE host LIKE %s and deleted=0""", (computeHost+"%"))
-        hostDetails = cur.fetchall()
-        print(hostDetails)
-    except MySQLdb.Error, e:
-        print "Error %d: %s" % (e.args[0],e.args[1])
-        sys.exit(1)
-    finally:
-        if connect:
-            connect.close()
-    instanceName = "instance-%08x" % int(hostDetails[1])
-    print "HOSTNAME:\t {hostname}\nHEX NAME:\t {hexname}\nID:\t\t {id}\nUUID:\t\t {uuid}\nHOST:\t\t {host}\nVM STATE:\t {state}\nTASK STATE:\t {taskstate}".format(hostname=hostDetails[0], hexname=instanceName, id=hostDetails[1], uuid=hostDetails[2], host=hostDetails[3], state=hostDetails[4], taskstate=hostDetails[5])
+            if args.instance_name:
+                self.get_instances(args.instance_name)
+                return
+
+            elif args.compute_host:
+                self.get_host_instances(args.compute_host)
+                return
+            
+            elif args.zones:
+                self.get_zone_report(args.zones)
+
+        except Exception as e:
+            import traceback
+            traceback.print_tb(sys.exc_info()[2])
+            sys.exit("ABORT! Something went wrong! %s" % e.message)
+
+        finally:
+            if self._db_connection:
+                self._db_connection.dispose()
+
+    def _get_db_credentials(self):
+        """Get mysql user/pass"""
+        if not self._db_credentials:
+            parser = ConfigParser.SafeConfigParser()
+            if '/root/.my.cnf' in parser.read('/root/.my.cnf'):
+                sql_user = parser.get("client", "user")
+                sql_pass = parser.get("client", "password")
+            else:
+                sql_user = raw_input("Enter MySQL user: ")
+                sql_pass = raw_input("Enter MySQL password: ")        
+            self._db_credentials["user"] = sql_user
+            self._db_credentials["pass"] = sql_pass
+        return self._db_credentials
+
+    def _get_db_connection(self, db="nova"):
+        user, passwd = self._get_db_credentials().values()
+        connection_string = "mysql://%s:%s@localhost/%s" % (user, passwd, db)
+        try:
+            self._db_connection = create_engine(connection_string)
+        except:
+            sys.exit("Couldn't connect to database! "
+                     "[connection string: %s]" % 
+                     connection_string)
+        return self._db_connection
+
+    def human_readable(self, size, sep=""):
+        unit = None
+        size = int(size)
+        for item in self._units:
+            if size < item[0]:
+                return "%s%s%s" % (size / unit[0], sep, unit[1])
+            unit = item
+
+    def format_table(self, data, align="left", pad_str=" ", pad_times=1):
+        out = ""
+        for item in data:
+            pad = max([len(key) for key in item]) * pad_times + len(pad_str)
+            for key, value in item.items():
+                key = key.rjust(pad).replace("_", " ").upper()
+                out += "%s:%s%s\n" % (key, pad_str, value)
+            out += "\n"
+        return out
+
+    def print_json(self, data):
+        print(json.dumps(data))
+
+    def get_instance_info(self, results):
+        infos = []
+        for row in results:
+            info = OrderedDict()
+            info["name"]       = row["display_name"]
+            info["virt_name"]  = "instance-%08x" % row["id"]
+            info["id"]         = row["id"]
+            info["uuid"]       = row["uuid"]
+            info["fixed_ip"]   = row["address"]
+            info["host"]       = row["host"]
+            info["tenant"]     = row["project"]
+            info["vm_state"]   = row["vm_state"]
+            info["task_state"] = row["task_state"]
+            info["vcpus"]      = row["vcpus"]
+            info["ram"]        = self.human_readable(row["ram"])
+            infos.append(info)
+        return infos
+
+    def get_instances(self, instance_name):
+
+        # convert instance name to instance ID and vice versa.
+        # does some basic error checks.
+        if self._hex_re.match(instance_name):
+            instance_id = int(instance_name[-8:], 16)
+            where = "WHERE i.id = %s" % instance_id
+        elif self._int_re.match(instance_name):
+            instance_id = int(instance_name)
+            where = "WHERE i.id = %s" % instance_id
+        else:
+            where = "WHERE display_name LIKE '%%%%%s%%%%'" % instance_name
+
+        results = self.db.execute(self._instance_query + where)
+        infos = self.get_instance_info(results)
+        
+        if self._output_json:
+            self.print_json(infos)
+        else:
+            print(self.format_table(infos))
+
+    def get_host_instances(self, compute_host):
+        where = "WHERE i.deleted=0 AND i.host LIKE '%s%%%%'" % compute_host
+        results = self.db.execute(self._instance_query + where)
+        infos = self.get_instance_info(results)
+
+        if self._output_json:
+            self.print_json(infos)
+        else:
+            print(self.format_table(infos))
+
+    def get_zone_report(self, zones):
+        if zones == "all":
+            zones = self.db.execute("""SELECT distinct availability_zone AS az
+                                       FROM services ORDER BY az""")
+            zones = [row["az"] for row in zones]
+        else:
+            zones = zones.split(",")
+
+        infos = []
+        for zone in zones:
+
+            results = self.db.execute(self._zone_query % zone)
+
+            info = {"zone": zone, "hosts": {}}
+
+            for row in results:
+                hosts = info["hosts"]
+                if not row["host"] in hosts:
+                    hosts[row["host"]] = {"vcpus": 0, "ram": 0, "vms": []}
+
+                ram   = float(row["ram"])
+                vcpus = int(row["vcpus"])
+                hosts[row["host"]]["ram"]   += ram
+                hosts[row["host"]]["vcpus"] += vcpus
+
+                vm = OrderedDict()
+                vm["id"]    = int(row["id"])
+                vm["name"]  = row["name"]
+                vm["vcpus"] = vcpus
+                vm["ram"]   = ram
+                hosts[row["host"]]["vms"].append(vm)
+
+            for properties in info["hosts"].values():
+                properties["ram"] = self.human_readable(properties["ram"])
+                for vm in properties["vms"]:
+                    vm["ram"] = self.human_readable(vm["ram"])
+            
+            infos.append(info)
+
+        if self._output_json:
+            self.print_json(infos)
+        else:
+            outs = []
+            for zone in infos:
+                if not zone["hosts"]:
+                    continue
+                out = OrderedDict()
+                out["zone"] = zone["zone"]
+                for host, info in zone["hosts"].items():
+                    out["host"]  = host
+                    out["ram"]   = info["ram"]
+                    out["vcpus"] = info["vcpus"] 
+                    vm = self.format_table(info["vms"], pad_times=2).rstrip()
+                    out["vms"] = "[\n%s\n    ]" % vm
+                outs.append(out)
+            print(self.format_table(outs).rstrip())
+#            print(json.dumps(infos, indent=4))
+
+if __name__ == "__main__":
+
+    #get arguments and put them into good variable names
+    parser = argparse.ArgumentParser(description="Nova swiss army knife")
+    parser.add_argument("-j", "--json", dest="use_json", action="store_true",
+                        help="Output results in JSON format")
+    parser.add_argument("-i", "--info", dest="instance_name", metavar="NAME",
+                        help='Get information about an instance')
+    parser.add_argument("-g", "--host", dest="compute_host", metavar="HOST",
+                        help='Get instances on a specific host')
+    parser.add_argument("-z", "--zone", dest="zones", metavar="ZONE", default=None,
+                        help="Get usage report for availability zone")
+    args = parser.parse_args()
+
+    if len(sys.argv) == 1:
+        sys.exit(parser.format_help())
+
+    Pulsar(args)
 
