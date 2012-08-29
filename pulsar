@@ -20,8 +20,12 @@ class Pulsar(object):
         self._db_credentials = {}
         self._db_connection = None
 
-        self._int_re = re.compile(r'^[1-9]')
+        self._int_re = re.compile(r'^[1-9]+$')
         self._hex_re = re.compile(r'^instance-[a-f0-9]{8}$')
+        self._uuid_re = re.compile(r'^[0-9a-f]{8}-'
+                                    '[0-9a-f]{4}-'
+                                    '[0-9a-f]{4}-'
+                                    '[0-9a-f]{4}-[0-9a-f]{12}$')
 
         self._output_json = args.use_json
 
@@ -63,6 +67,7 @@ class Pulsar(object):
             
             elif args.zones:
                 self.get_zone_report(args.zones)
+                return
 
         except Exception as e:
             import traceback
@@ -88,8 +93,9 @@ class Pulsar(object):
         return self._db_credentials
 
     def _get_db_connection(self, db="nova"):
-        user, passwd = self._get_db_credentials().values()
-        connection_string = "mysql://%s:%s@localhost/%s" % (user, passwd, db)
+        creds = self._get_db_credentials()
+        creds["db"] = db
+        connection_string = "mysql://%(user)s:%(pass)s@localhost/%(db)s" % creds 
         try:
             self._db_connection = create_engine(connection_string)
         except:
@@ -97,6 +103,12 @@ class Pulsar(object):
                      "[connection string: %s]" % 
                      connection_string)
         return self._db_connection
+
+    def _print_table(self, data):
+        print(self.format_table(data))
+
+    def _print_json(self, data):
+        print(json.dumps(data))
 
     def human_readable(self, size, sep=""):
         unit = None
@@ -111,13 +123,14 @@ class Pulsar(object):
         for item in data:
             pad = max([len(key) for key in item]) * pad_times + len(pad_str)
             for key, value in item.items():
-                key = key.rjust(pad).replace("_", " ").upper()
+                if align == "left":
+                    key = key.ljust(pad)
+                else:
+                    key = key.rjust(pad)
+                key = key.replace("_", " ").upper()
                 out += "%s:%s%s\n" % (key, pad_str, value)
             out += "\n"
         return out
-
-    def print_json(self, data):
-        print(json.dumps(data))
 
     def get_instance_info(self, results):
         infos = []
@@ -138,15 +151,14 @@ class Pulsar(object):
         return infos
 
     def get_instances(self, instance_name):
-
-        # convert instance name to instance ID and vice versa.
-        # does some basic error checks.
         if self._hex_re.match(instance_name):
             instance_id = int(instance_name[-8:], 16)
             where = "WHERE i.id = %s" % instance_id
         elif self._int_re.match(instance_name):
             instance_id = int(instance_name)
             where = "WHERE i.id = %s" % instance_id
+        elif self._uuid_re.match(instance_name):
+            where = "WHERE i.uuid = '%s'" % instance_name
         else:
             where = "WHERE display_name LIKE '%%%%%s%%%%'" % instance_name
 
@@ -154,9 +166,9 @@ class Pulsar(object):
         infos = self.get_instance_info(results)
         
         if self._output_json:
-            self.print_json(infos)
+            self._print_json(infos)
         else:
-            print(self.format_table(infos))
+            self._print_table(infos)
 
     def get_host_instances(self, compute_host):
         where = "WHERE i.deleted=0 AND i.host LIKE '%s%%%%'" % compute_host
@@ -164,7 +176,7 @@ class Pulsar(object):
         infos = self.get_instance_info(results)
 
         if self._output_json:
-            self.print_json(infos)
+            self._print_json(infos)
         else:
             print(self.format_table(infos))
 
@@ -208,7 +220,7 @@ class Pulsar(object):
             infos.append(info)
 
         if self._output_json:
-            self.print_json(infos)
+            self._print_json(infos)
         else:
             outs = []
             for zone in infos:
@@ -220,8 +232,8 @@ class Pulsar(object):
                     out["host"]  = host
                     out["ram"]   = info["ram"]
                     out["vcpus"] = info["vcpus"] 
-                    vm = self.format_table(info["vms"], pad_times=2).rstrip()
-                    out["vms"] = "[\n%s\n    ]" % vm
+                    vm = self.format_table(info["vms"], align="right", pad_times=2)
+                    out["vms"] = "[\n%s\n]" % vm.rstrip()
                 outs.append(out)
             print(self.format_table(outs).rstrip())
 #            print(json.dumps(infos, indent=4))
@@ -244,4 +256,5 @@ if __name__ == "__main__":
         sys.exit(parser.format_help())
 
     Pulsar(args)
+
 
