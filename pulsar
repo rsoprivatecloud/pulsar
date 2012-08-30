@@ -29,12 +29,11 @@ class Pulsar(object):
 
         self._output_json = args.use_json
 
-        self._units = (
-            (float(2**10), "KB"),
-            (float(2**20), "MB"),
-            (float(2**30), "GB"),
-            (float(2**40), "TB")
-        )
+        self._units = OrderedDict()
+        self._units["KB"] = float(2**10)
+        self._units["MB"] = float(2**20)
+        self._units["GB"] = float(2**30)
+        self._units["TB"] = float(2**40)
 
         self._instance_query = """SELECT k.name as project, i.display_name,
                                          i.id, i.uuid, i.host, i.vm_state,
@@ -51,7 +50,8 @@ class Pulsar(object):
                                      memory_mb * pow(2, 20) as ram
                               FROM instances WHERE deleted=0 AND host IN
                               (SELECT distinct host FROM services
-                               WHERE availability_zone='%s' ORDER BY host ASC)"""
+                               WHERE availability_zone='%s')
+                              ORDER BY host ASC"""
 
 
         try:
@@ -112,11 +112,13 @@ class Pulsar(object):
 
     def human_readable(self, size, sep=""):
         unit = None
+        divisor = 1
         size = int(size)
-        for item in self._units:
-            if size < item[0]:
-                return "%s%s%s" % (size / unit[0], sep, unit[1])
-            unit = item
+        for key, value in self._units.items():
+            if size < value:
+                return "%s%s%s" % (size / divisor, sep, unit)
+            unit = key
+            divisor = value
 
     def format_table(self, data, align="left", pad_str=" ", pad_times=1):
         out = ""
@@ -178,7 +180,7 @@ class Pulsar(object):
         if self._output_json:
             self._print_json(infos)
         else:
-            print(self.format_table(infos))
+            self._print_table(infos)
 
     def get_zone_report(self, zones):
         if zones == "all":
@@ -193,10 +195,10 @@ class Pulsar(object):
 
             results = self.db.execute(self._zone_query % zone)
 
-            info = {"zone": zone, "hosts": {}}
+            zone = {"zone": zone, "hosts": OrderedDict()}
 
             for row in results:
-                hosts = info["hosts"]
+                hosts = zone["hosts"]
                 if not row["host"] in hosts:
                     hosts[row["host"]] = {"vcpus": 0, "ram": 0, "vms": []}
 
@@ -212,12 +214,12 @@ class Pulsar(object):
                 vm["ram"]   = ram
                 hosts[row["host"]]["vms"].append(vm)
 
-            for properties in info["hosts"].values():
+            for properties in zone["hosts"].values():
                 properties["ram"] = self.human_readable(properties["ram"])
                 for vm in properties["vms"]:
                     vm["ram"] = self.human_readable(vm["ram"])
             
-            infos.append(info)
+            infos.append(zone)
 
         if self._output_json:
             self._print_json(infos)
@@ -226,21 +228,19 @@ class Pulsar(object):
             for zone in infos:
                 if not zone["hosts"]:
                     continue
-                out = OrderedDict()
-                out["zone"] = zone["zone"]
                 for host, info in zone["hosts"].items():
+                    out = OrderedDict()
+                    out["zone"] = zone["zone"]
                     out["host"]  = host
                     out["ram"]   = info["ram"]
                     out["vcpus"] = info["vcpus"] 
-                    vm = self.format_table(info["vms"], align="right", pad_times=2)
-                    out["vms"] = "[\n%s\n]" % vm.rstrip()
-                outs.append(out)
+                    vms = self.format_table(info["vms"], align="right", pad_times=2)
+                    out["vms"] = "[\n%s\n]" % vms.rstrip()
+                    outs.append(out)
             print(self.format_table(outs).rstrip())
-#            print(json.dumps(infos, indent=4))
+
 
 if __name__ == "__main__":
-
-    #get arguments and put them into good variable names
     parser = argparse.ArgumentParser(description="Nova swiss army knife")
     parser.add_argument("-j", "--json", dest="use_json", action="store_true",
                         help="Output results in JSON format")
