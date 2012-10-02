@@ -46,6 +46,11 @@ class Pulsar(object):
                                   JOIN fixed_ips as f
                                   ON i.id=f.instance_id """
 
+        self._image_query = """SELECT image_id
+                               FROM image_properties
+                               WHERE name='instance_uuid'
+                               AND value='%s' """
+
         self._zone_query = """SELECT id, display_name as name, host, vcpus,
                                      memory_mb * pow(2, 20) as ram
                               FROM instances WHERE deleted=0 AND host IN
@@ -130,6 +135,8 @@ class Pulsar(object):
                 else:
                     key = key.rjust(pad)
                 key = key.replace("_", " ").upper()
+                if type(value) in (tuple, list):
+                    value = ", ".join(value)
                 out += "%s:%s%s\n" % (key, pad_str, value)
             out += "\n"
         return out
@@ -149,6 +156,13 @@ class Pulsar(object):
             info["task_state"] = row["task_state"]
             info["vcpus"]      = row["vcpus"]
             info["ram"]        = self.human_readable(row["ram"])
+            db = self._get_db_connection('glance')
+            images = db.execute(self._image_query % row["uuid"])
+            if images:
+                info["snapshots"] = []
+                for image in images:
+                    info["snapshots"].append(image[0])
+            db.dispose()
             infos.append(info)
         return infos
 
