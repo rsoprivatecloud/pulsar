@@ -137,7 +137,8 @@ class Pulsar(object):
                     key = key.rjust(pad)
                 key = key.replace("_", " ").upper()
                 if type(value) in (tuple, list):
-                    value = "\n".join([(pad_str * (pad + 2)) + v for v in value]).lstrip()
+                    sep = "\n" + (pad_str * (pad + 2))
+                    value = sep.join(value)
                 out += "%s:%s%s\n" % (key, pad_str, value)
             out += "\n"
         return out.rstrip()
