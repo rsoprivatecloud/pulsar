@@ -48,7 +48,8 @@ class Pulsar(object):
 
         self._image_query = """SELECT image_id
                                FROM image_properties
-                               WHERE name='instance_uuid'
+                               WHERE deleted=0
+                               AND name='instance_uuid'
                                AND value='%s' """
 
         self._zone_query = """SELECT id, display_name as name, host, vcpus,
@@ -136,10 +137,10 @@ class Pulsar(object):
                     key = key.rjust(pad)
                 key = key.replace("_", " ").upper()
                 if type(value) in (tuple, list):
-                    value = ", ".join(value)
+                    value = "\n".join([(pad_str * (pad + 2)) + v for v in value]).lstrip()
                 out += "%s:%s%s\n" % (key, pad_str, value)
             out += "\n"
-        return out
+        return out.rstrip()
 
     def get_instance_info(self, results):
         infos = []
@@ -156,12 +157,10 @@ class Pulsar(object):
             info["task_state"] = row["task_state"]
             info["vcpus"]      = row["vcpus"]
             info["ram"]        = self.human_readable(row["ram"])
+            info["snapshots"]  = []
             db = self._get_db_connection('glance')
-            images = db.execute(self._image_query % row["uuid"])
-            if images:
-                info["snapshots"] = []
-                for image in images:
-                    info["snapshots"].append(image[0])
+            for image in db.execute(self._image_query % row["uuid"]):
+                info["snapshots"].append(image[0])
             db.dispose()
             infos.append(info)
         return infos
