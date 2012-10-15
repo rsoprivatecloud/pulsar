@@ -18,6 +18,7 @@ Arguments:
 License and Author
 
 Author:: Ramsey Pawlik (ramsey.pawlik@rackspace.com)
+
 Author:: Jordan Callicoat (jordan.callicoat@rackspace.com)
 
 Copyright 2012, Rackspace US, Inc.
